@@ -8,7 +8,7 @@ const { Readable } = require('stream');
 
 const app = express();
 
-// CORS configuration - allows both localhost and production frontend
+// CORS configuration - allows both localhost and production frontenddd
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:3001',
