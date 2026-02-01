@@ -8,28 +8,23 @@ const { Readable } = require('stream');
 
 const app = express();
 
-// CORS configuration - allows both localhost and production frontenddd
+// CORS configuration
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:3001',
   process.env.FRONTEND_URL
-].filter(Boolean); // Remove any undefined values
+].filter(Boolean);
 
 app.use(cors({
   origin: function(origin, callback) {
-    // Allow requests with no origin (like mobile apps, curl, Postman)
     if (!origin) return callback(null, true);
-    
-    // Allow all origins if FRONTEND_URL is '*'
     if (process.env.FRONTEND_URL === '*') {
       return callback(null, true);
     }
-    
-    // Check if origin is in allowed list
     if (allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
-      callback(null, true); // For development, allow all. Change to false in production.
+      callback(null, true);
     }
   },
   credentials: true,
@@ -67,8 +62,12 @@ const upload = multer({
   }
 });
 
-// Contact Schema
-const contactSchema = new mongoose.Schema({
+// ==========================================
+// SCHEMAS - Two Different Collections
+// ==========================================
+
+// Schema for Internship/Career inquiries (WITH resume)
+const internshipContactSchema = new mongoose.Schema({
   name: { type: String, required: true },
   mobile: String,
   email: { type: String, required: true },
@@ -79,10 +78,25 @@ const contactSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
-const Contact = mongoose.model("Contact", contactSchema);
+// Schema for General Contact (WITHOUT resume)
+const generalContactSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  mobile: String,
+  email: { type: String, required: true },
+  subject: String,
+  message: String,
+  createdAt: { type: Date, default: Date.now }
+});
 
-// POST - Submit contact form
-app.post("/api/contact", upload.single("resume"), async (req, res) => {
+const InternshipContact = mongoose.model("InternshipContact", internshipContactSchema);
+const GeneralContact = mongoose.model("GeneralContact", generalContactSchema);
+
+// ==========================================
+// ROUTES
+// ==========================================
+
+// POST - Submit INTERNSHIP form (with resume)
+app.post("/api/contact/internship", upload.single("resume"), async (req, res) => {
   try {
     const { name, mobile, email, subject, message } = req.body;
 
@@ -111,7 +125,7 @@ app.post("/api/contact", upload.single("resume"), async (req, res) => {
       console.log(`✅ Resume uploaded with ID: ${fileId}`);
     }
 
-    const newContact = new Contact({
+    const newContact = new InternshipContact({
       name,
       mobile,
       email,
@@ -125,7 +139,7 @@ app.post("/api/contact", upload.single("resume"), async (req, res) => {
 
     res.json({
       success: true,
-      message: "Contact and resume saved successfully!",
+      message: "Internship application saved successfully!",
       data: {
         ...newContact.toObject(),
         resumeDownloadUrl: fileId ? `/api/resume/${fileId}` : null
@@ -136,7 +150,38 @@ app.post("/api/contact", upload.single("resume"), async (req, res) => {
     console.error("❌ Error:", error);
     res.status(500).json({
       success: false,
-      message: "Failed to save contact",
+      message: "Failed to save internship application",
+      error: error.message,
+    });
+  }
+});
+
+// POST - Submit GENERAL contact form (without resume)
+app.post("/api/contact/general", async (req, res) => {
+  try {
+    const { name, mobile, email, subject, message } = req.body;
+
+    const newContact = new GeneralContact({
+      name,
+      mobile,
+      email,
+      subject,
+      message,
+    });
+
+    await newContact.save();
+
+    res.json({
+      success: true,
+      message: "Message saved successfully!",
+      data: newContact,
+    });
+
+  } catch (error) {
+    console.error("❌ Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to save message",
       error: error.message,
     });
   }
@@ -175,10 +220,10 @@ app.get("/api/resume/:id", async (req, res) => {
   }
 });
 
-// GET - Fetch all contacts
-app.get("/api/contacts", async (req, res) => {
+// GET - Fetch all internship contacts
+app.get("/api/contacts/internship", async (req, res) => {
   try {
-    const contacts = await Contact.find().sort({ createdAt: -1 });
+    const contacts = await InternshipContact.find().sort({ createdAt: -1 });
     res.json({
       success: true,
       data: contacts,
@@ -186,7 +231,23 @@ app.get("/api/contacts", async (req, res) => {
   } catch (error) {
     res.status(500).json({
       success: false,
-      message: "Failed to fetch contacts",
+      message: "Failed to fetch internship contacts",
+    });
+  }
+});
+
+// GET - Fetch all general contacts
+app.get("/api/contacts/general", async (req, res) => {
+  try {
+    const contacts = await GeneralContact.find().sort({ createdAt: -1 });
+    res.json({
+      success: true,
+      data: contacts,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch general contacts",
     });
   }
 });
@@ -200,7 +261,7 @@ app.get("/", (req, res) => {
   });
 });
 
-// Start server (only for local development)
+// Start server
 const PORT = process.env.PORT || 5000;
 if (process.env.NODE_ENV !== 'production') {
   app.listen(PORT, () => {
@@ -209,5 +270,4 @@ if (process.env.NODE_ENV !== 'production') {
   });
 }
 
-// Export for Vercel
 module.exports = app;
