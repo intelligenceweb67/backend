@@ -1,43 +1,46 @@
-require('dotenv').config();
-const express = require('express');
-const mongoose = require('mongoose');
-const cors = require('cors');
-const multer = require('multer');
-const { GridFSBucket } = require('mongodb');
-const { Readable } = require('stream');
+require("dotenv").config();
+const express = require("express");
+const mongoose = require("mongoose");
+const cors = require("cors");
+const multer = require("multer");
+const { GridFSBucket } = require("mongodb");
+const { Readable } = require("stream");
 
 const app = express();
 
 // CORS configuration
 const allowedOrigins = [
-  'http://localhost:3000',
-  'http://localhost:3001',
-  process.env.FRONTEND_URL
+  "http://localhost:3000",
+  "http://localhost:3001",
+  process.env.FRONTEND_URL,
 ].filter(Boolean);
 
-app.use(cors({
-  origin: function(origin, callback) {
-    if (!origin) return callback(null, true);
-    if (process.env.FRONTEND_URL === '*') {
-      return callback(null, true);
-    }
-    if (allowedOrigins.indexOf(origin) !== -1) {
-      callback(null, true);
-    } else {
-      callback(null, true);
-    }
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
+app.use(
+  cors({
+    origin: function (origin, callback) {
+      if (!origin) return callback(null, true);
+      if (process.env.FRONTEND_URL === "*") {
+        return callback(null, true);
+      }
+      if (allowedOrigins.indexOf(origin) !== -1) {
+        callback(null, true);
+      } else {
+        callback(null, true);
+      }
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  }),
+);
 
 app.use(express.json());
 
 let gfsBucket;
 
 // MongoDB connection
-mongoose.connect(process.env.MONGODB_URI)
+mongoose
+  .connect(process.env.MONGODB_URI)
   .then(() => {
     console.log("✅ MongoDB Connected Successfully!");
     const db = mongoose.connection.db;
@@ -46,20 +49,20 @@ mongoose.connect(process.env.MONGODB_URI)
     });
     console.log("📂 GridFS Bucket Ready!");
   })
-  .catch(err => console.error("❌ MongoDB Connection Error:", err));
+  .catch((err) => console.error("❌ MongoDB Connection Error:", err));
 
 // Multer configuration
 const storage = multer.memoryStorage();
-const upload = multer({ 
+const upload = multer({
   storage,
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    if (file.mimetype === 'application/pdf') {
+    if (file.mimetype === "application/pdf") {
       cb(null, true);
     } else {
-      cb(new Error('Only PDF files are allowed!'), false);
+      cb(new Error("Only PDF files are allowed!"), false);
     }
-  }
+  },
 });
 
 // ==========================================
@@ -69,13 +72,12 @@ const upload = multer({
 // Schema for Internship/Career inquiries (WITH resume)
 const internshipContactSchema = new mongoose.Schema({
   name: { type: String, required: true },
-  mobile: String,
+  lastName: { type: String, required: true },
+  mobile: { type: String, required: true },
   email: { type: String, required: true },
-  subject: String,
-  message: String,
   resumeFileId: mongoose.Schema.Types.ObjectId,
   resumeFileName: String,
-  createdAt: { type: Date, default: Date.now }
+  createdAt: { type: Date, default: Date.now },
 });
 
 // Schema for General Contact (WITHOUT resume)
@@ -85,10 +87,13 @@ const generalContactSchema = new mongoose.Schema({
   email: { type: String, required: true },
   subject: String,
   message: String,
-  createdAt: { type: Date, default: Date.now }
+  createdAt: { type: Date, default: Date.now },
 });
 
-const InternshipContact = mongoose.model("InternshipContact", internshipContactSchema);
+const InternshipContact = mongoose.model(
+  "InternshipContact",
+  internshipContactSchema,
+);
 const GeneralContact = mongoose.model("GeneralContact", generalContactSchema);
 
 // ==========================================
@@ -96,14 +101,32 @@ const GeneralContact = mongoose.model("GeneralContact", generalContactSchema);
 // ==========================================
 
 // POST - Submit INTERNSHIP form (with resume)
-app.post("/api/contact/internship", upload.single("resume"), async (req, res) => {
-  try {
-    const { name, mobile, email, subject, message } = req.body;
+app.post(
+  "/api/contact/internship",
+  upload.single("resume"),
+  async (req, res) => {
+    try {
+      const { name, lastName, mobile, email } = req.body;
 
-    let fileId = null;
-    let fileName = null;
+      // Validation
+      if (!name || !lastName || !email || !mobile) {
+        return res.status(400).json({
+          success: false,
+          message: "All fields are required: name, lastName, email, and mobile",
+        });
+      }
 
-    if (req.file) {
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          message: "Resume file is required",
+        });
+      }
+
+      let fileId = null;
+      let fileName = null;
+
+      // Upload resume to GridFS
       const readableStream = new Readable();
       readableStream.push(req.file.buffer);
       readableStream.push(null);
@@ -117,44 +140,43 @@ app.post("/api/contact/internship", upload.single("resume"), async (req, res) =>
       fileId = uploadStream.id;
 
       await new Promise((resolve, reject) => {
-        readableStream.pipe(uploadStream)
-          .on('error', reject)
-          .on('finish', resolve);
+        readableStream
+          .pipe(uploadStream)
+          .on("error", reject)
+          .on("finish", resolve);
       });
 
       console.log(`✅ Resume uploaded with ID: ${fileId}`);
+
+      const newContact = new InternshipContact({
+        name,
+        lastName,
+        mobile,
+        email,
+        resumeFileId: fileId,
+        resumeFileName: fileName,
+      });
+
+      await newContact.save();
+
+      res.json({
+        success: true,
+        message: "Internship application saved successfully!",
+        data: {
+          ...newContact.toObject(),
+          resumeDownloadUrl: fileId ? `/api/resume/${fileId}` : null,
+        },
+      });
+    } catch (error) {
+      console.error("❌ Error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to save internship application",
+        error: error.message,
+      });
     }
-
-    const newContact = new InternshipContact({
-      name,
-      mobile,
-      email,
-      subject,
-      message,
-      resumeFileId: fileId,
-      resumeFileName: fileName,
-    });
-
-    await newContact.save();
-
-    res.json({
-      success: true,
-      message: "Internship application saved successfully!",
-      data: {
-        ...newContact.toObject(),
-        resumeDownloadUrl: fileId ? `/api/resume/${fileId}` : null
-      },
-    });
-
-  } catch (error) {
-    console.error("❌ Error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to save internship application",
-      error: error.message,
-    });
-  }
-});
+  },
+);
 
 // POST - Submit GENERAL contact form (without resume)
 app.post("/api/contact/general", async (req, res) => {
@@ -176,7 +198,6 @@ app.post("/api/contact/general", async (req, res) => {
       message: "Message saved successfully!",
       data: newContact,
     });
-
   } catch (error) {
     console.error("❌ Error:", error);
     res.status(500).json({
@@ -191,29 +212,28 @@ app.post("/api/contact/general", async (req, res) => {
 app.get("/api/resume/:id", async (req, res) => {
   try {
     const fileId = new mongoose.Types.ObjectId(req.params.id);
-    
+
     const files = await gfsBucket.find({ _id: fileId }).toArray();
-    
+
     if (!files || files.length === 0) {
       return res.status(404).json({ error: "Resume not found" });
     }
 
     const file = files[0];
-    
+
     res.set({
-      'Content-Type': 'application/pdf',
-      'Content-Disposition': `inline; filename="${file.filename}"`,
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `inline; filename="${file.filename}"`,
     });
 
     const downloadStream = gfsBucket.openDownloadStream(fileId);
-    
-    downloadStream.on('error', (error) => {
+
+    downloadStream.on("error", (error) => {
       console.error("Download error:", error);
       res.status(500).json({ error: "Error downloading file" });
     });
 
     downloadStream.pipe(res);
-
   } catch (err) {
     console.error("❌ Error:", err);
     res.status(400).json({ error: "Invalid resume ID" });
@@ -254,16 +274,16 @@ app.get("/api/contacts/general", async (req, res) => {
 
 // Health check
 app.get("/", (req, res) => {
-  res.json({ 
+  res.json({
     status: "✅ Server is running!",
     timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development'
+    environment: process.env.NODE_ENV || "development",
   });
 });
 
 // Start server
 const PORT = process.env.PORT || 5000;
-if (process.env.NODE_ENV !== 'production') {
+if (process.env.NODE_ENV !== "production") {
   app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`📡 API available at http://localhost:${PORT}`);
