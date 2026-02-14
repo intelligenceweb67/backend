@@ -12,6 +12,7 @@ const app = express();
 const allowedOrigins = [
   "http://localhost:3000",
   "http://localhost:3001",
+  "https://int-elligence.co.uk",
   process.env.FRONTEND_URL,
 ].filter(Boolean);
 
@@ -36,20 +37,38 @@ app.use(
 
 app.use(express.json());
 
-let gfsBucket;
+// ==========================================
+// DATABASE CONNECTION - SERVERLESS OPTIMIZED
+// ==========================================
+let cachedDb = null;
+let gfsBucket = null;
 
-// MongoDB connection
-mongoose
-  .connect(process.env.MONGODB_URI)
-  .then(() => {
-    console.log("✅ MongoDB Connected Successfully!");
-    const db = mongoose.connection.db;
-    gfsBucket = new GridFSBucket(db, {
+async function connectToDatabase() {
+  if (cachedDb && gfsBucket) {
+    console.log("♻️  Using cached database connection");
+    return { db: cachedDb, gfsBucket };
+  }
+
+  try {
+    console.log("🔄 Connecting to MongoDB...");
+    const conn = await mongoose.connect(process.env.MONGODB_URI, {
+      serverSelectionTimeoutMS: 5000,
+    });
+    
+    cachedDb = conn.connection.db;
+    gfsBucket = new GridFSBucket(cachedDb, {
       bucketName: "resumes",
     });
+    
+    console.log("✅ MongoDB Connected Successfully!");
     console.log("📂 GridFS Bucket Ready!");
-  })
-  .catch((err) => console.error("❌ MongoDB Connection Error:", err));
+    
+    return { db: cachedDb, gfsBucket };
+  } catch (err) {
+    console.error("❌ MongoDB Connection Error:", err);
+    throw err;
+  }
+}
 
 // Multer configuration
 const storage = multer.memoryStorage();
@@ -100,12 +119,24 @@ const GeneralContact = mongoose.model("GeneralContact", generalContactSchema);
 // ROUTES
 // ==========================================
 
+// Health check
+app.get("/", (req, res) => {
+  res.json({
+    status: "✅ Server is running!",
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || "development",
+  });
+});
+
 // POST - Submit INTERNSHIP form (with resume)
 app.post(
   "/api/contact/internship",
   upload.single("resume"),
   async (req, res) => {
     try {
+      // Connect to database first
+      const { gfsBucket } = await connectToDatabase();
+
       const { name, lastName, mobile, email } = req.body;
 
       // Validation
@@ -181,7 +212,18 @@ app.post(
 // POST - Submit GENERAL contact form (without resume)
 app.post("/api/contact/general", async (req, res) => {
   try {
+    // Connect to database first
+    await connectToDatabase();
+
     const { name, mobile, email, subject, message } = req.body;
+
+    // Validation
+    if (!name || !email) {
+      return res.status(400).json({
+        success: false,
+        message: "Name and email are required",
+      });
+    }
 
     const newContact = new GeneralContact({
       name,
@@ -211,6 +253,9 @@ app.post("/api/contact/general", async (req, res) => {
 // GET - Download resume
 app.get("/api/resume/:id", async (req, res) => {
   try {
+    // Connect to database first
+    const { gfsBucket } = await connectToDatabase();
+
     const fileId = new mongoose.Types.ObjectId(req.params.id);
 
     const files = await gfsBucket.find({ _id: fileId }).toArray();
@@ -243,12 +288,16 @@ app.get("/api/resume/:id", async (req, res) => {
 // GET - Fetch all internship contacts
 app.get("/api/contacts/internship", async (req, res) => {
   try {
+    // Connect to database first
+    await connectToDatabase();
+
     const contacts = await InternshipContact.find().sort({ createdAt: -1 });
     res.json({
       success: true,
       data: contacts,
     });
   } catch (error) {
+    console.error("❌ Error:", error);
     res.status(500).json({
       success: false,
       message: "Failed to fetch internship contacts",
@@ -259,12 +308,16 @@ app.get("/api/contacts/internship", async (req, res) => {
 // GET - Fetch all general contacts
 app.get("/api/contacts/general", async (req, res) => {
   try {
+    // Connect to database first
+    await connectToDatabase();
+
     const contacts = await GeneralContact.find().sort({ createdAt: -1 });
     res.json({
       success: true,
       data: contacts,
     });
   } catch (error) {
+    console.error("❌ Error:", error);
     res.status(500).json({
       success: false,
       message: "Failed to fetch general contacts",
@@ -272,22 +325,5 @@ app.get("/api/contacts/general", async (req, res) => {
   }
 });
 
-// Health check
-app.get("/", (req, res) => {
-  res.json({
-    status: "✅ Server is running!",
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || "development",
-  });
-});
-
-// Start server
-const PORT = process.env.PORT || 5000;
-if (process.env.NODE_ENV !== "production") {
-  app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`📡 API available at http://localhost:${PORT}`);
-  });
-}
-
+// Export for Vercel serverless
 module.exports = app;
