@@ -41,10 +41,23 @@ app.use(
             }
 
             if (process.env.FRONTEND_URL) {
-                const cleanFrontend = process.env.FRONTEND_URL.replace(/^https?:\/\//i, "").split('/')[0];
+                let cleanFrontend = process.env.FRONTEND_URL.replace(/^https?:\/\//i, "").split('/')[0];
                 const cleanOrigin = origin.replace(/^https?:\/\//i, "").split('/')[0];
                 
-                if (cleanOrigin === cleanFrontend || cleanOrigin.endsWith("." + cleanFrontend)) {
+                // Extract base domain to strip prefixes like "staging." or "www."
+                const parts = cleanFrontend.split(".");
+                let baseDomain = cleanFrontend;
+                if (parts.length > 2) {
+                    if (cleanFrontend.endsWith(".pages.dev") && parts.length > 3) {
+                        baseDomain = parts.slice(-3).join(".");
+                    } else if (!cleanFrontend.endsWith(".pages.dev")) {
+                        const isCoUk = cleanFrontend.endsWith(".co.uk") || cleanFrontend.endsWith(".org.uk");
+                        baseDomain = parts.slice(isCoUk ? -3 : -2).join(".");
+                    }
+                }
+                
+                if (cleanOrigin === baseDomain || cleanOrigin.endsWith("." + baseDomain) || 
+                    cleanOrigin === cleanFrontend || cleanOrigin.endsWith("." + cleanFrontend)) {
                     return callback(null, true);
                 }
             }
