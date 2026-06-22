@@ -41,16 +41,11 @@ app.use(
             }
 
             if (process.env.FRONTEND_URL) {
-                try {
-                    const frontendUrl = new URL(process.env.FRONTEND_URL);
-                    const baseDomain = frontendUrl.hostname;
-                    const originUrl = new URL(origin);
-                    
-                    if (originUrl.hostname === baseDomain || originUrl.hostname.endsWith("." + baseDomain)) {
-                        return callback(null, true);
-                    }
-                } catch (e) {
-                    console.error("CORS domain parsing error:", e);
+                const cleanFrontend = process.env.FRONTEND_URL.replace(/^https?:\/\//i, "").split('/')[0];
+                const cleanOrigin = origin.replace(/^https?:\/\//i, "").split('/')[0];
+                
+                if (cleanOrigin === cleanFrontend || cleanOrigin.endsWith("." + cleanFrontend)) {
+                    return callback(null, true);
                 }
             }
 
