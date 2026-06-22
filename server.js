@@ -4,7 +4,6 @@ const express = require("express");
 const mongoose = require("mongoose");
 const cors =require("cors");
 const multer = require("multer");
-const {GridFSBucket} = require("mongodb");
 const {Readable} = require("stream");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
@@ -36,7 +35,11 @@ app.use(
                             origin.startsWith("http://10.") ||
                             origin.startsWith("http://172.");
 
-            if (isLocal || allowedOrigins.indexOf(origin) !== -1) {
+            // Fallback rule to automatically allow Cloudflare Pages staging subdomains
+            const cleanOrigin = origin.replace(/^https?:\/\//i, "").split('/')[0];
+            const isStagingPagesDev = cleanOrigin === "skillbridge-d8a.pages.dev" || cleanOrigin.endsWith(".skillbridge-d8a.pages.dev");
+
+            if (isLocal || isStagingPagesDev || allowedOrigins.indexOf(origin) !== -1) {
                 return callback(null, true);
             }
 
@@ -73,37 +76,9 @@ app.use(
 app.use(express.json());
 
 // ==========================================
-// DATABASE CONNECTION - SERVERLESS OPTIMIZED
+// DATABASE CONNECTION - MODULARIZED
 // ==========================================
-let cachedDb = null;
-let gfsBucket = null;
-
-async function connectToDatabase() {
-    if (cachedDb && gfsBucket) {
-        console.log("T?  Using cached database connection");
-        return {db: cachedDb, gfsBucket};
-    }
-
-    try {
-        console.log("Y Connecting to MongoDB...");
-        const conn = await mongoose.connect(process.env.MONGODB_URI, {
-            serverSelectionTimeoutMS: 5000,
-        });
-
-        cachedDb = conn.connection.db;
-        gfsBucket = new GridFSBucket(cachedDb, {
-            bucketName: "resumes",
-        });
-
-        console.log("o. MongoDB Connected Successfully!");
-        console.log("Y GridFS Bucket Ready!");
-
-        return {db: cachedDb, gfsBucket};
-    } catch (err) {
-        console.error("?O MongoDB Connection Error:", err);
-        throw err;
-    }
-}
+const { connectToDatabase, getGfsBucket } = require("./connection");
 
 // Multer configuration
 const storage = multer.memoryStorage();
@@ -120,51 +95,9 @@ const upload = multer({
 });
 
 // ==========================================
-// SCHEMAS - Two Different Collections
+// SCHEMAS & MODELS - MODULARIZED
 // ==========================================
-
-// Schema for Internship/Career inquiries (WITH resume)
-const internshipContactSchema = new mongoose.Schema({
-    name: {type: String, required: true},
-    lastName: {type: String, required: true},
-    mobile: {type: String, required: true},
-    email: {type: String, required: true},
-    resumeFileId: mongoose.Schema.Types.ObjectId,
-    resumeFileName: String,
-    createdAt: {type: Date, default: Date.now},
-});
-
-// Schema for General Contact (WITHOUT resume)
-const generalContactSchema = new mongoose.Schema({
-    name: {type: String, required: true},
-    mobile: String,
-    email: {type: String, required: true},
-    subject: String,
-    message: String,
-    createdAt: {type: Date, default: Date.now},
-});
-
-const InternshipContact = mongoose.model(
-    "InternshipContact",
-    internshipContactSchema,
-);
-const GeneralContact = mongoose.model("GeneralContact", generalContactSchema);
-
-// Schema for Blogs
-const blogSchema = new mongoose.Schema({
-    title: {type: String, required: true},
-    subtitle: {type: String},
-    content: {type: String, required: true},
-    category: {type: String, required: true},
-    tags: [{type: String}],
-    imageUrl: {type: String},
-    readTime: {type: String},
-    authorName: {type: String, default: "SkillBridge Team"},
-    published: {type: Boolean, default: true},
-    createdAt: {type: Date, default: Date.now},
-});
-
-const Blog = mongoose.model("Blog", blogSchema);
+const { InternshipContact, GeneralContact, Blog } = require("./schema");
 
 // ==========================================
 // ROUTES
@@ -199,7 +132,7 @@ app.post("/api/auth/login", (req, res) => {
             sameSite: isLocal ? 'strict' : 'none',
             maxAge: 3600000 // 1 hour
         });
-        res.json({success: true});
+        res.json({success: true, token});
     } else {
         res.status(401).json({message: "Invalid credentials"});
     }
@@ -222,6 +155,9 @@ app.post("/api/auth/logout", (req, res) => {
 });
 
 const verifyToken = (req, res, next) => {
+    let token = null;
+
+    // 1. Check cookies
     const cookieHeader = req.headers.cookie || "";
     const cookies = Object.fromEntries(
         cookieHeader.split(";").map(c => {
@@ -230,7 +166,15 @@ const verifyToken = (req, res, next) => {
             return [c.substring(0, index).trim(), c.substring(index + 1)];
         })
     );
-    const token = cookies.token;
+    if (cookies.token) {
+        token = cookies.token;
+    }
+
+    // 2. Check Authorization header
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+        token = authHeader.substring(7);
+    }
 
     if (!token) {
         return res.status(403).json({message: "A token is required for authentication"});
@@ -402,19 +346,56 @@ app.get("/api/resume/:id",verifyToken, async (req, res) => {
     }
 });
 
-// GET - Fetch all internship contacts
+// GET - Fetch all internship contacts (supports pagination, search, and date filters)
 app.get("/api/contacts/internship", verifyToken, async (req, res) => {
     try {
-        // Connect to database first
         await connectToDatabase();
-
-        const contacts = await InternshipContact.find().sort({createdAt: -1});
+        
+        let { page, limit, search, startDate, endDate } = req.query;
+        page = parseInt(page) || 1;
+        limit = parseInt(limit) || 10;
+        const skip = (page - 1) * limit;
+        
+        let query = {};
+        
+        if (search) {
+            query.$or = [
+                { name: { $regex: search, $options: "i" } },
+                { lastName: { $regex: search, $options: "i" } },
+                { email: { $regex: search, $options: "i" } }
+            ];
+        }
+        
+        if (startDate || endDate) {
+            query.createdAt = {};
+            if (startDate) {
+                query.createdAt.$gte = new Date(startDate);
+            }
+            if (endDate) {
+                const end = new Date(endDate);
+                end.setHours(23, 59, 59, 999);
+                query.createdAt.$lte = end;
+            }
+        }
+        
+        const total = await InternshipContact.countDocuments(query);
+        const contacts = await InternshipContact.find(query)
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(limit);
+            
         res.json({
             success: true,
             data: contacts,
+            pagination: {
+                total,
+                page,
+                pages: Math.ceil(total / limit),
+                limit
+            }
         });
     } catch (error) {
-        console.error("?O Error:", error);
+        console.error("Error fetching internship contacts:", error);
         res.status(500).json({
             success: false,
             message: "Failed to fetch internship contacts",
@@ -422,23 +403,101 @@ app.get("/api/contacts/internship", verifyToken, async (req, res) => {
     }
 });
 
-// GET - Fetch all general contacts
+// GET - Fetch all general contacts (supports pagination, search, and date filters)
 app.get("/api/contacts/general", verifyToken, async (req, res) => {
     try {
-        // Connect to database first
         await connectToDatabase();
-
-        const contacts = await GeneralContact.find().sort({createdAt: -1});
+        
+        let { page, limit, search, startDate, endDate } = req.query;
+        page = parseInt(page) || 1;
+        limit = parseInt(limit) || 10;
+        const skip = (page - 1) * limit;
+        
+        let query = {};
+        
+        if (search) {
+            query.$or = [
+                { name: { $regex: search, $options: "i" } },
+                { email: { $regex: search, $options: "i" } }
+            ];
+        }
+        
+        if (startDate || endDate) {
+            query.createdAt = {};
+            if (startDate) {
+                query.createdAt.$gte = new Date(startDate);
+            }
+            if (endDate) {
+                const end = new Date(endDate);
+                end.setHours(23, 59, 59, 999);
+                query.createdAt.$lte = end;
+            }
+        }
+        
+        const total = await GeneralContact.countDocuments(query);
+        const contacts = await GeneralContact.find(query)
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(limit);
+            
         res.json({
             success: true,
             data: contacts,
+            pagination: {
+                total,
+                page,
+                pages: Math.ceil(total / limit),
+                limit
+            }
         });
     } catch (error) {
-        console.error("?O Error:", error);
+        console.error("Error fetching general contacts:", error);
         res.status(500).json({
             success: false,
             message: "Failed to fetch general contacts",
         });
+    }
+});
+
+// DELETE - Delete general contact (admin only)
+app.delete("/api/contacts/general/:id", verifyToken, async (req, res) => {
+    try {
+        await connectToDatabase();
+        const contact = await GeneralContact.findByIdAndDelete(req.params.id);
+        if (!contact) {
+            return res.status(404).json({ success: false, message: "Contact not found" });
+        }
+        res.json({ success: true, message: "General contact deleted successfully" });
+    } catch (error) {
+        console.error("Error deleting general contact:", error);
+        res.status(500).json({ success: false, message: "Failed to delete general contact" });
+    }
+});
+
+// DELETE - Delete internship contact and associated GridFS resume (admin only)
+app.delete("/api/contacts/internship/:id", verifyToken, async (req, res) => {
+    try {
+        const { gfsBucket } = await connectToDatabase();
+        const contact = await InternshipContact.findById(req.params.id);
+        
+        if (!contact) {
+            return res.status(404).json({ success: false, message: "Contact not found" });
+        }
+        
+        if (contact.resumeFileId) {
+            try {
+                await gfsBucket.delete(contact.resumeFileId);
+                console.log(`Successfully deleted GridFS resume ${contact.resumeFileId}`);
+            } catch (fileErr) {
+                console.error("Failed to delete GridFS file (it might have been deleted already):", fileErr);
+            }
+        }
+        
+        await InternshipContact.findByIdAndDelete(req.params.id);
+        res.json({ success: true, message: "Internship application deleted successfully" });
+    } catch (error) {
+        console.error("Error deleting internship contact:", error);
+        res.status(500).json({ success: false, message: "Failed to delete internship application" });
     }
 });
 
