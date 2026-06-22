@@ -12,7 +12,7 @@ const jwt = require("jsonwebtoken");
 const app = express();
 
 // hashedPassword
-const hashedPassword = bcrypt.hashSync(process.env.ADMIN_PASSWORD, 10);
+const hashedPassword = process.env.ADMIN_PASSWORD ? bcrypt.hashSync(process.env.ADMIN_PASSWORD, 10) : "";
 
 // CORS configuration
 const allowedOrigins = [
