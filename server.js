@@ -195,8 +195,8 @@ app.post("/api/auth/login", (req, res) => {
         );
         res.cookie('token', token, {
             httpOnly: true,
-            secure: !isLocal && process.env.NODE_ENV === 'production',
-            sameSite: 'strict',
+            secure: !isLocal,
+            sameSite: isLocal ? 'strict' : 'none',
             maxAge: 3600000 // 1 hour
         });
         res.json({success: true});
@@ -215,8 +215,8 @@ app.post("/api/auth/logout", (req, res) => {
     );
     res.clearCookie('token', {
         httpOnly: true,
-        secure: !isLocal && process.env.NODE_ENV === 'production',
-        sameSite: 'strict'
+        secure: !isLocal,
+        sameSite: isLocal ? 'strict' : 'none'
     });
     res.json({success: true});
 });
