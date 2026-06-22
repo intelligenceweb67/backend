@@ -36,7 +36,11 @@ app.use(
                             origin.startsWith("http://10.") ||
                             origin.startsWith("http://172.");
 
-            if (isLocal || allowedOrigins.indexOf(origin) !== -1) {
+            // Fallback rule to automatically allow Cloudflare Pages staging subdomains
+            const cleanOrigin = origin.replace(/^https?:\/\//i, "").split('/')[0];
+            const isStagingPagesDev = cleanOrigin === "skillbridge-d8a.pages.dev" || cleanOrigin.endsWith(".skillbridge-d8a.pages.dev");
+
+            if (isLocal || isStagingPagesDev || allowedOrigins.indexOf(origin) !== -1) {
                 return callback(null, true);
             }
 
