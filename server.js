@@ -29,16 +29,32 @@ app.use(
             if (process.env.FRONTEND_URL === "*") {
                 return callback(null, true);
             }
-            if (
-                allowedOrigins.indexOf(origin) !== -1 ||
-                origin.startsWith("http://192.168.") ||
-                origin.startsWith("http://10.") ||
-                origin.startsWith("http://172.")
-            ) {
-                callback(null, true);
-            } else {
-                callback(new Error("Not allowed by CORS"));
+
+            const isLocal = origin.startsWith("http://localhost") ||
+                            origin.startsWith("http://127.0.0.1") ||
+                            origin.startsWith("http://192.168.") ||
+                            origin.startsWith("http://10.") ||
+                            origin.startsWith("http://172.");
+
+            if (isLocal || allowedOrigins.indexOf(origin) !== -1) {
+                return callback(null, true);
             }
+
+            if (process.env.FRONTEND_URL) {
+                try {
+                    const frontendUrl = new URL(process.env.FRONTEND_URL);
+                    const baseDomain = frontendUrl.hostname;
+                    const originUrl = new URL(origin);
+                    
+                    if (originUrl.hostname === baseDomain || originUrl.hostname.endsWith("." + baseDomain)) {
+                        return callback(null, true);
+                    }
+                } catch (e) {
+                    console.error("CORS domain parsing error:", e);
+                }
+            }
+
+            callback(new Error("Not allowed by CORS"));
         },
         credentials: true,
         methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
