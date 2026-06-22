@@ -4,7 +4,6 @@ const express = require("express");
 const mongoose = require("mongoose");
 const cors =require("cors");
 const multer = require("multer");
-const {GridFSBucket} = require("mongodb");
 const {Readable} = require("stream");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
@@ -77,37 +76,9 @@ app.use(
 app.use(express.json());
 
 // ==========================================
-// DATABASE CONNECTION - SERVERLESS OPTIMIZED
+// DATABASE CONNECTION - MODULARIZED
 // ==========================================
-let cachedDb = null;
-let gfsBucket = null;
-
-async function connectToDatabase() {
-    if (cachedDb && gfsBucket) {
-        console.log("T?  Using cached database connection");
-        return {db: cachedDb, gfsBucket};
-    }
-
-    try {
-        console.log("Y Connecting to MongoDB...");
-        const conn = await mongoose.connect(process.env.MONGODB_URI, {
-            serverSelectionTimeoutMS: 5000,
-        });
-
-        cachedDb = conn.connection.db;
-        gfsBucket = new GridFSBucket(cachedDb, {
-            bucketName: "resumes",
-        });
-
-        console.log("o. MongoDB Connected Successfully!");
-        console.log("Y GridFS Bucket Ready!");
-
-        return {db: cachedDb, gfsBucket};
-    } catch (err) {
-        console.error("?O MongoDB Connection Error:", err);
-        throw err;
-    }
-}
+const { connectToDatabase, getGfsBucket } = require("./connection");
 
 // Multer configuration
 const storage = multer.memoryStorage();
@@ -124,51 +95,9 @@ const upload = multer({
 });
 
 // ==========================================
-// SCHEMAS - Two Different Collections
+// SCHEMAS & MODELS - MODULARIZED
 // ==========================================
-
-// Schema for Internship/Career inquiries (WITH resume)
-const internshipContactSchema = new mongoose.Schema({
-    name: {type: String, required: true},
-    lastName: {type: String, required: true},
-    mobile: {type: String, required: true},
-    email: {type: String, required: true},
-    resumeFileId: mongoose.Schema.Types.ObjectId,
-    resumeFileName: String,
-    createdAt: {type: Date, default: Date.now},
-});
-
-// Schema for General Contact (WITHOUT resume)
-const generalContactSchema = new mongoose.Schema({
-    name: {type: String, required: true},
-    mobile: String,
-    email: {type: String, required: true},
-    subject: String,
-    message: String,
-    createdAt: {type: Date, default: Date.now},
-});
-
-const InternshipContact = mongoose.model(
-    "InternshipContact",
-    internshipContactSchema,
-);
-const GeneralContact = mongoose.model("GeneralContact", generalContactSchema);
-
-// Schema for Blogs
-const blogSchema = new mongoose.Schema({
-    title: {type: String, required: true},
-    subtitle: {type: String},
-    content: {type: String, required: true},
-    category: {type: String, required: true},
-    tags: [{type: String}],
-    imageUrl: {type: String},
-    readTime: {type: String},
-    authorName: {type: String, default: "SkillBridge Team"},
-    published: {type: Boolean, default: true},
-    createdAt: {type: Date, default: Date.now},
-});
-
-const Blog = mongoose.model("Blog", blogSchema);
+const { InternshipContact, GeneralContact, Blog } = require("./schema");
 
 // ==========================================
 // ROUTES
