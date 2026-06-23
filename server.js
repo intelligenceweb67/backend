@@ -94,10 +94,23 @@ const upload = multer({
     },
 });
 
+const imageUpload = multer({
+    storage,
+    limits: {fileSize: 2 * 1024 * 1024}, // 2MB limit
+    fileFilter: (req, file, cb) => {
+        const allowedTypes = ["image/png", "image/jpeg", "image/jpg", "image/svg+xml", "image/webp", "image/gif"];
+        if (allowedTypes.includes(file.mimetype)) {
+            cb(null, true);
+        } else {
+            cb(new Error("Only image files are allowed (png, jpg, jpeg, svg, webp, gif)!"), false);
+        }
+    },
+});
+
 // ==========================================
 // SCHEMAS & MODELS - MODULARIZED
 // ==========================================
-const { InternshipContact, GeneralContact, Blog } = require("./schema");
+const { InternshipContact, GeneralContact, Blog, Course, Review } = require("./schema");
 
 // ==========================================
 // ROUTES
@@ -639,6 +652,425 @@ app.delete("/api/blogs/:id", verifyToken, async (req, res) => {
     }
 });
 
+// ==========================================
+// COURSES API
+// ==========================================
+// IMPORTANT: Route ordering matters in Express!
+// Specific routes (e.g. /admin/all, /id/:id, /tool-image/:id) MUST be declared
+// BEFORE the generic wildcard route /:slug to prevent incorrect matching.
+
+// GET - List all published courses (public, ordered by 'order' field)
+app.get("/api/courses", async (req, res) => {
+    try {
+        await connectToDatabase();
+        const courses = await Course.find({ published: true })
+            .sort({ order: 1, createdAt: 1 })
+            .select("slug title shortTitle hero.headline hero.statistics programHighlights.duration published order");
+        res.json({ success: true, data: courses });
+    } catch (error) {
+        console.error("Error fetching courses:", error);
+        res.status(500).json({ success: false, message: "Failed to fetch courses" });
+    }
+});
+
+// GET - List ALL courses including unpublished (admin only)
+// Must be before /:slug to avoid route conflict
+app.get("/api/courses/admin/all", verifyToken, async (req, res) => {
+    try {
+        await connectToDatabase();
+        const courses = await Course.find({})
+            .sort({ order: 1, createdAt: 1 })
+            .select("slug title shortTitle published order createdAt");
+        res.json({ success: true, data: courses });
+    } catch (error) {
+        console.error("Error fetching all courses:", error);
+        res.status(500).json({ success: false, message: "Failed to fetch courses" });
+    }
+});
+
+// GET - Fetch single course by MongoDB _id (admin edit form)
+// Must be before /:slug to avoid route conflict
+app.get("/api/courses/id/:id", verifyToken, async (req, res) => {
+    try {
+        await connectToDatabase();
+        const course = await Course.findById(req.params.id);
+        if (!course) {
+            return res.status(404).json({ success: false, message: "Course not found" });
+        }
+        res.json({ success: true, data: course });
+    } catch (error) {
+        console.error("Error fetching course by id:", error);
+        res.status(400).json({ success: false, message: "Invalid ID or error retrieving course" });
+    }
+});
+
+// GET - Serve tool image/logo from GridFS (public)
+// Must be before /:slug to avoid route conflict — 'tool-image' would otherwise match as a slug
+app.get("/api/courses/tool-image/:id", async (req, res) => {
+    try {
+        const { gfsBucket } = await connectToDatabase();
+        const fileId = new mongoose.Types.ObjectId(req.params.id);
+        const files = await gfsBucket.find({ _id: fileId }).toArray();
+
+        if (!files || files.length === 0) {
+            return res.status(404).json({ success: false, message: "Image not found" });
+        }
+
+        const file = files[0];
+
+        res.set({
+            "Content-Type": file.contentType || "image/png",
+            "Cache-Control": "public, max-age=31536000",
+        });
+
+        const downloadStream = gfsBucket.openDownloadStream(fileId);
+
+        downloadStream.on("error", (error) => {
+            console.error("Tool image serving error:", error);
+            res.status(500).json({ success: false, message: "Error downloading file" });
+        });
+
+        downloadStream.pipe(res);
+    } catch (err) {
+        console.error("Error serving tool image:", err);
+        res.status(400).json({ success: false, message: "Invalid image ID" });
+    }
+});
+
+// GET - Fetch single course by slug (public — used by InternshipDetailPage)
+// MUST come AFTER all specific /api/courses/XXX routes above
+app.get("/api/courses/:slug", async (req, res) => {
+    try {
+        await connectToDatabase();
+        const course = await Course.findOne({ slug: req.params.slug, published: true });
+        if (!course) {
+            return res.status(404).json({ success: false, message: "Course not found" });
+        }
+        res.json({ success: true, data: course });
+    } catch (error) {
+        console.error("Error fetching course:", error);
+        res.status(500).json({ success: false, message: "Failed to fetch course" });
+    }
+});
+
+// PUT - Update a course by _id (admin only)
+app.put("/api/courses/:id", verifyToken, async (req, res) => {
+    try {
+        await connectToDatabase();
+        if (!req.body.slug || !req.body.title) {
+            return res.status(400).json({ success: false, message: "slug and title are required" });
+        }
+        const updatedCourse = await Course.findByIdAndUpdate(
+            req.params.id,
+            { ...req.body },
+            { new: true, runValidators: true }
+        );
+        if (!updatedCourse) {
+            return res.status(404).json({ success: false, message: "Course not found" });
+        }
+        res.json({ success: true, message: "Course updated successfully!", data: updatedCourse });
+    } catch (error) {
+        console.error("Error updating course:", error);
+        res.status(500).json({ success: false, message: "Failed to update course", error: error.message });
+    }
+});
+
+// DELETE - Delete a course by _id (admin only)
+app.delete("/api/courses/:id", verifyToken, async (req, res) => {
+    try {
+        await connectToDatabase();
+        const deleted = await Course.findByIdAndDelete(req.params.id);
+        if (!deleted) {
+            return res.status(404).json({ success: false, message: "Course not found" });
+        }
+        res.json({ success: true, message: "Course deleted successfully!" });
+    } catch (error) {
+        console.error("Error deleting course:", error);
+        res.status(500).json({ success: false, message: "Failed to delete course" });
+    }
+});
+
+// POST - Upload tool image/logo to GridFS (admin only)
+// Must be before POST /api/courses to avoid any potential conflicts
+app.post("/api/courses/upload-tool-logo", verifyToken, (req, res, next) => {
+    imageUpload.single("image")(req, res, (err) => {
+        if (err) {
+            return next(err);
+        }
+        next();
+    });
+}, async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ success: false, message: "Image file is required" });
+        }
+
+        const { gfsBucket } = await connectToDatabase();
+        const fileName = `tool_logo_${Date.now()}_${req.file.originalname}`;
+        const uploadStream = gfsBucket.openUploadStream(fileName, {
+            contentType: req.file.mimetype,
+        });
+
+        const fileId = uploadStream.id;
+
+        await new Promise((resolve, reject) => {
+            const stream = require("stream");
+            const bufferStream = new stream.PassThrough();
+            bufferStream.end(req.file.buffer);
+            bufferStream
+                .pipe(uploadStream)
+                .on("error", reject)
+                .on("finish", resolve);
+        });
+
+        console.log(`Successfully uploaded tool logo to GridFS with ID: ${fileId}`);
+
+        res.json({
+            success: true,
+            message: "Logo uploaded successfully!",
+            url: `/api/courses/tool-image/${fileId}`,
+        });
+    } catch (error) {
+        console.error("Error uploading tool logo:", error);
+        res.status(500).json({ success: false, message: "Failed to upload logo", error: error.message });
+    }
+});
+
+// POST - Seed courses in bulk (admin only, idempotent via slug upsert)
+// IMPORTANT: This route MUST come before POST /api/courses to match before the generic handler.
+// Used once to migrate the 5 existing static course files into MongoDB.
+app.post("/api/courses/seed", verifyToken, async (req, res) => {
+    try {
+        await connectToDatabase();
+        const courses = req.body; // Expect array of course objects
+        if (!Array.isArray(courses) || courses.length === 0) {
+            return res.status(400).json({ success: false, message: "Request body must be a non-empty array of course objects" });
+        }
+        const results = [];
+        for (const courseData of courses) {
+            if (!courseData.slug) continue;
+            const result = await Course.findOneAndUpdate(
+                { slug: courseData.slug },
+                { $set: courseData },
+                { upsert: true, new: true, runValidators: true }
+            );
+            results.push({ slug: courseData.slug, id: result._id });
+        }
+        res.json({ success: true, message: `${results.length} courses seeded successfully`, data: results });
+    } catch (error) {
+        console.error("Error seeding courses:", error);
+        res.status(500).json({ success: false, message: "Failed to seed courses", error: error.message });
+    }
+});
+
+// POST - Create new course (admin only)
+app.post("/api/courses", verifyToken, async (req, res) => {
+    try {
+        await connectToDatabase();
+        const { slug } = req.body;
+        if (!slug || !req.body.title) {
+            return res.status(400).json({ success: false, message: "slug and title are required" });
+        }
+        // Check slug uniqueness
+        const existing = await Course.findOne({ slug });
+        if (existing) {
+            return res.status(409).json({ success: false, message: `A course with slug "${slug}" already exists` });
+        }
+        const newCourse = new Course(req.body);
+        await newCourse.save();
+        res.json({ success: true, message: "Course created successfully!", data: newCourse });
+    } catch (error) {
+        console.error("Error creating course:", error);
+        res.status(500).json({ success: false, message: "Failed to create course", error: error.message });
+    }
+});
+
+// ==========================================
+// COURSE IMAGES & GOOGLE REVIEWS ENDPOINTS
+// ==========================================
+
+// Helper for https requests to Google Places
+const https = require("https");
+function fetchGoogleReviews(placeId, apiKey) {
+    return new Promise((resolve, reject) => {
+        const url = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${placeId}&fields=reviews&key=${apiKey}`;
+        https.get(url, (res) => {
+            let data = "";
+            res.on("data", (chunk) => data += chunk);
+            res.on("end", () => {
+                try {
+                    const parsed = JSON.parse(data);
+                    if (parsed.status === "OK") {
+                        resolve(parsed.result.reviews || []);
+                    } else {
+                        reject(new Error(`Google API returned status ${parsed.status}: ${parsed.error_message || ''}`));
+                    }
+                } catch (e) {
+                    reject(e);
+                }
+            });
+        }).on("error", reject);
+    });
+}
+
+const fallbackReviews = [
+  {
+    id: 1,
+    name: "Joshua Olatunbosun",
+    quote: "Training was delivered in an interesting and simple way. It was quite insightful.",
+    link: "https://share.google/APzhEBCyPtCkALx8m"
+  },
+  {
+    id: 2,
+    name: "Christen Sattouf",
+    quote: "The course was very valuable and enjoyable. We learned everything related to machine learning and deep learning, including how to use each model and when to apply it. Weekly meetings with the instructor for feedback and discussions were extremely helpful. The final projects made the concepts practical and fun.",
+    link: "https://share.google/Lhnwp46VRQFZGNRH4"
+  },
+  {
+    id: 3,
+    name: "Oladele Fagbayi",
+    quote: "It's a wonderful experience I had with IntElligence Tech Solutions, especially in Machine Learning and Deep Learning. I was exposed to real-time applications like predictive forex apps, movie recommendation systems, and agentic AI. I am deeply grateful to Mohammed Noman, Salman Amin, and the entire team.",
+    link: "https://maps.app.goo.gl/sB8QmEoECDqXKcnL9"
+  },
+  {
+    id: 4,
+    name: "Emily Willey",
+    quote: "Absolutely brilliant experience with IntElligence Tech Solutions! The hands-on projects gave me real-world skills straight away. The mentors were incredibly supportive, and the program was well-structured and industry-relevant. Highly recommend to anyone in the UK looking to break into data science!",
+    link: "https://maps.app.goo.gl/16LFn2XkF7WhhnaZ7"
+  },
+  {
+    id: 5,
+    name: "Emils Bahanovskis",
+    quote: "Great programme, learned a great deal, and very personable people! Weekly calls with an instructor ensured frequent feedback and rapid improvement.",
+    link: "https://maps.app.goo.gl/5PnEyT3GxunTAhmk6"
+  },
+  {
+    id: 6,
+    name: "Richard Trescothick",
+    quote: "Every module felt meaningful and connected to real outcomes, not just classroom work. The guidance and support were sincere, making the entire process rewarding.",
+    link: ""
+  },
+  {
+    id: 7,
+    name: "Killian Higgins",
+    quote: "In addition to being incredibly informative and well presented, the staff and teachers were helpful and understanding at every step. I walked away having learned a lot and would recommend it to anyone.",
+    link: "https://maps.app.goo.gl/sjZRb8ptTw1EcJrJ8"
+  },
+  {
+    id: 8,
+    name: "Valarmathi Sri",
+    quote: "I had a truly enriching experience during my Data Science internship. I built a full trading bot using LSTM models with measurable performance gains. Special thanks to my mentor Mohammed Noman for his patience, guidance, and encouragement.",
+    link: "https://maps.app.goo.gl/W2sWr8Qp8Q69qGMKA"
+  },
+  {
+    id: 9,
+    name: "George Cunningham",
+    quote: "Enrolling in the Data Science training and internship certificate program was career-changing. It transformed my understanding of real-world data science far beyond university learning. Highly recommended for anyone in the UK.",
+    link: "https://maps.app.goo.gl/a59iJmpka7fRNLCP6"
+  },
+  {
+    id: 10,
+    name: "Obanla Oluwaseun",
+    quote: "My internship training was a real eye-opener into professional data science. Mr. Noman broke down complex concepts clearly and prioritized industry-relevant skills. The projects truly make you employable.",
+    link: "https://maps.app.goo.gl/wt12AGcUs9hGCPnf6"
+  }
+];
+
+// ==========================================
+// REVIEWS API (Admin-managed + fallback)
+// ==========================================
+
+// GET - Fetch all published admin-managed reviews (public)
+// Used by ParticipantsTestimonials.jsx — falls back to hardcoded data on the frontend if empty.
+app.get("/api/reviews", async (req, res) => {
+    try {
+        await connectToDatabase();
+        const reviews = await Review.find({ published: true })
+            .sort({ order: 1, createdAt: -1 });
+        res.json({ success: true, data: reviews });
+    } catch (error) {
+        console.error("Error fetching reviews:", error);
+        res.status(500).json({ success: false, message: "Failed to fetch reviews" });
+    }
+});
+
+// GET - Fetch ALL reviews including unpublished (admin only)
+app.get("/api/reviews/admin/all", verifyToken, async (req, res) => {
+    try {
+        await connectToDatabase();
+        const reviews = await Review.find({}).sort({ order: 1, createdAt: -1 });
+        res.json({ success: true, data: reviews });
+    } catch (error) {
+        console.error("Error fetching all reviews:", error);
+        res.status(500).json({ success: false, message: "Failed to fetch reviews" });
+    }
+});
+
+// POST - Create new review (admin only)
+app.post("/api/reviews", verifyToken, async (req, res) => {
+    try {
+        await connectToDatabase();
+        const { name, quote, rating, link, avatar, published, order } = req.body;
+        if (!name || !quote) {
+            return res.status(400).json({ success: false, message: "name and quote are required" });
+        }
+        const review = new Review({ name, quote, rating, link, avatar, published, order });
+        await review.save();
+        res.json({ success: true, message: "Review created!", data: review });
+    } catch (error) {
+        console.error("Error creating review:", error);
+        res.status(500).json({ success: false, message: "Failed to create review", error: error.message });
+    }
+});
+
+// PUT - Update a review by _id (admin only)
+app.put("/api/reviews/:id", verifyToken, async (req, res) => {
+    try {
+        await connectToDatabase();
+        const updated = await Review.findByIdAndUpdate(
+            req.params.id,
+            { ...req.body },
+            { new: true, runValidators: true }
+        );
+        if (!updated) {
+            return res.status(404).json({ success: false, message: "Review not found" });
+        }
+        res.json({ success: true, message: "Review updated!", data: updated });
+    } catch (error) {
+        console.error("Error updating review:", error);
+        res.status(500).json({ success: false, message: "Failed to update review", error: error.message });
+    }
+});
+
+// DELETE - Delete a review by _id (admin only)
+app.delete("/api/reviews/:id", verifyToken, async (req, res) => {
+    try {
+        await connectToDatabase();
+        const deleted = await Review.findByIdAndDelete(req.params.id);
+        if (!deleted) {
+            return res.status(404).json({ success: false, message: "Review not found" });
+        }
+        res.json({ success: true, message: "Review deleted!" });
+    } catch (error) {
+        console.error("Error deleting review:", error);
+        res.status(500).json({ success: false, message: "Failed to delete review" });
+    }
+});
+
+// GET - Legacy Google Places proxy (kept for backwards compat; returns DB reviews or hardcoded fallback)
+app.get("/api/reviews/google", async (req, res) => {
+    try {
+        await connectToDatabase();
+        const dbReviews = await Review.find({ published: true }).sort({ order: 1, createdAt: -1 });
+        if (dbReviews.length > 0) {
+            return res.json({ success: true, source: "db", data: dbReviews });
+        }
+    } catch (err) {
+        console.warn("DB unavailable for reviews, using static fallback");
+    }
+    res.json({ success: true, source: "fallback", data: fallbackReviews });
+});
+
 // Global error handling middleware
 app.use((err, req, res, next) => {
     console.error("Global error handler caught:", err);
@@ -648,7 +1080,7 @@ app.use((err, req, res, next) => {
             message: err.code === "LIMIT_FILE_SIZE" ? "File size limit exceeded (max 5MB)" : err.message
         });
     }
-    if (err.message === "Only PDF files are allowed!") {
+    if (err.message === "Only PDF files are allowed!" || err.message.startsWith("Only image files are allowed")) {
         return res.status(400).json({
             success: false,
             message: err.message
