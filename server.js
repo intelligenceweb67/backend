@@ -686,7 +686,7 @@ app.get("/api/courses", async (req, res) => {
         await connectToDatabase();
         const courses = await Course.find({ published: true })
             .sort({ order: 1, createdAt: 1 })
-            .select("slug title shortTitle hero.headline hero.statistics programHighlights.duration published order");
+            .select("slug title shortTitle cardDescription cardImage hero.headline hero.statistics programHighlights.duration published order");
         res.json({ success: true, data: courses });
     } catch (error) {
         console.error("Error fetching courses:", error);

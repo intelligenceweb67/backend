@@ -51,6 +51,8 @@ const courseSchema = new mongoose.Schema({
     slug: { type: String, required: true, unique: true },
     title: { type: String, required: true },
     shortTitle: { type: String },
+    cardDescription: { type: String, default: '' },
+    cardImage: { type: String, default: '' },
 
     // Hero section
     hero: {
