@@ -6,6 +6,7 @@ const internshipContactSchema = new mongoose.Schema({
     lastName: { type: String, required: true },
     mobile: { type: String, required: true },
     email: { type: String, required: true },
+    program: { type: String },
     resumeFileId: mongoose.Schema.Types.ObjectId,
     resumeFileName: String,
     createdAt: { type: Date, default: Date.now },
@@ -156,6 +157,28 @@ const reviewSchema = new mongoose.Schema({
     avatar: { type: String, default: '' },            // Avatar image URL (optional; falls back to coloured initial)
     published: { type: Boolean, default: true },      // Controls visibility on public pages
     order: { type: Number, default: 0 },              // Lower number = shown first
+    // pages[] controls which pages/courses display this review.
+    // Values: "homepage" | any course slug (e.g. "data-science", "machine-learning")
+    // Empty array = show on all published pages (legacy behaviour).
+    pages: { type: [String], default: [] },
+    createdAt: { type: Date, default: Date.now },
+});
+
+// ============================================================
+// Schema for Video Testimonials
+// Videos can be stored in two ways:
+//   1. Uploaded file in GridFS  → videoFileId (ObjectId)
+//   2. External URL             → videoUrl (YouTube, Vimeo, direct .mp4)
+// Both fields may coexist; the frontend prefers videoFileId if present.
+// pages[] mirrors the reviewSchema.pages convention.
+// ============================================================
+const videoTestimonialSchema = new mongoose.Schema({
+    name: { type: String, required: true },           // Person's name shown under video
+    videoFileId: { type: mongoose.Schema.Types.ObjectId, default: null }, // GridFS file ID
+    videoUrl: { type: String, default: '' },          // External URL fallback
+    pages: { type: [String], default: [] },           // Which pages show this video
+    published: { type: Boolean, default: true },
+    order: { type: Number, default: 0 },
     createdAt: { type: Date, default: Date.now },
 });
 
@@ -165,6 +188,7 @@ const GeneralContact = mongoose.models.GeneralContact || mongoose.model("General
 const Blog = mongoose.models.Blog || mongoose.model("Blog", blogSchema);
 const Course = mongoose.models.Course || mongoose.model("Course", courseSchema);
 const Review = mongoose.models.Review || mongoose.model("Review", reviewSchema);
+const VideoTestimonial = mongoose.models.VideoTestimonial || mongoose.model("VideoTestimonial", videoTestimonialSchema);
 
 module.exports = {
     InternshipContact,
@@ -172,4 +196,5 @@ module.exports = {
     Blog,
     Course,
     Review,
+    VideoTestimonial,
 };

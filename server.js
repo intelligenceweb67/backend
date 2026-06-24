@@ -1,3 +1,9 @@
+const dns = require("dns");
+try {
+    dns.setServers(["8.8.8.8", "1.1.1.1"]);
+} catch (e) {
+    console.warn("Failed to set custom DNS servers, using system default:", e);
+}
 
 require("dotenv").config();
 const express = require("express");
@@ -107,10 +113,24 @@ const imageUpload = multer({
     },
 });
 
+// Multer config for video uploads (50MB, common video types)
+const videoUpload = multer({
+    storage,
+    limits: { fileSize: 50 * 1024 * 1024 }, // 50MB
+    fileFilter: (req, file, cb) => {
+        const allowedTypes = ["video/mp4", "video/webm", "video/ogg", "video/quicktime", "video/x-msvideo"];
+        if (allowedTypes.includes(file.mimetype)) {
+            cb(null, true);
+        } else {
+            cb(new Error("Only video files are allowed (mp4, webm, ogg, mov, avi)!"), false);
+        }
+    },
+});
+
 // ==========================================
 // SCHEMAS & MODELS - MODULARIZED
 // ==========================================
-const { InternshipContact, GeneralContact, Blog, Course, Review } = require("./schema");
+const { InternshipContact, GeneralContact, Blog, Course, Review, VideoTestimonial } = require("./schema");
 
 // ==========================================
 // ROUTES
@@ -211,7 +231,7 @@ app.post(
             // Connect to database first
             const {gfsBucket} = await connectToDatabase();
 
-            const {name, lastName, mobile, email} = req.body;
+            const {name, lastName, mobile, email, program} = req.body;
 
             // Validation
             if (!name || !lastName || !email || !mobile) {
@@ -258,6 +278,7 @@ app.post(
                 lastName,
                 mobile,
                 email,
+                program,
                 resumeFileId: fileId,
                 resumeFileName: fileName,
             });
@@ -757,17 +778,23 @@ app.get("/api/courses/:slug", async (req, res) => {
 app.put("/api/courses/:id", verifyToken, async (req, res) => {
     try {
         await connectToDatabase();
-        if (!req.body.slug || !req.body.title) {
+        const existing = await Course.findById(req.params.id);
+        if (!existing) {
+            return res.status(404).json({ success: false, message: "Course not found" });
+        }
+
+        const slug = req.body.slug !== undefined ? req.body.slug : existing.slug;
+        const title = req.body.title !== undefined ? req.body.title : existing.title;
+
+        if (!slug || !title) {
             return res.status(400).json({ success: false, message: "slug and title are required" });
         }
+
         const updatedCourse = await Course.findByIdAndUpdate(
             req.params.id,
             { ...req.body },
             { new: true, runValidators: true }
         );
-        if (!updatedCourse) {
-            return res.status(404).json({ success: false, message: "Course not found" });
-        }
         res.json({ success: true, message: "Course updated successfully!", data: updatedCourse });
     } catch (error) {
         console.error("Error updating course:", error);
@@ -980,13 +1007,19 @@ const fallbackReviews = [
 // REVIEWS API (Admin-managed + fallback)
 // ==========================================
 
-// GET - Fetch all published admin-managed reviews (public)
-// Used by ParticipantsTestimonials.jsx — falls back to hardcoded data on the frontend if empty.
+// GET - Fetch published reviews (public)
+// Optional ?page= filter: "homepage", "data-science", etc.
+// Empty pages[] on a review = show everywhere (backwards compat).
 app.get("/api/reviews", async (req, res) => {
     try {
         await connectToDatabase();
-        const reviews = await Review.find({ published: true })
-            .sort({ order: 1, createdAt: -1 });
+        const { page } = req.query;
+        let query = { published: true };
+        if (page) {
+            // Match reviews that either list this page OR have an empty pages array (show everywhere)
+            query = { published: true, $or: [{ pages: page }, { pages: { $size: 0 } }] };
+        }
+        const reviews = await Review.find(query).sort({ order: 1, createdAt: -1 });
         res.json({ success: true, data: reviews });
     } catch (error) {
         console.error("Error fetching reviews:", error);
@@ -1006,15 +1039,40 @@ app.get("/api/reviews/admin/all", verifyToken, async (req, res) => {
     }
 });
 
+// POST - Bulk seed reviews (admin only) — idempotent, upserts by name
+app.post("/api/reviews/seed", verifyToken, async (req, res) => {
+    try {
+        await connectToDatabase();
+        const reviews = req.body;
+        if (!Array.isArray(reviews) || reviews.length === 0) {
+            return res.status(400).json({ success: false, message: "Body must be a non-empty array" });
+        }
+        const results = [];
+        for (const r of reviews) {
+            if (!r.name || !r.quote) continue;
+            const result = await Review.findOneAndUpdate(
+                { name: r.name },
+                { $set: r },
+                { upsert: true, new: true, runValidators: true }
+            );
+            results.push(result.name);
+        }
+        res.json({ success: true, message: `${results.length} reviews seeded`, data: results });
+    } catch (error) {
+        console.error("Error seeding reviews:", error);
+        res.status(500).json({ success: false, message: "Failed to seed reviews", error: error.message });
+    }
+});
+
 // POST - Create new review (admin only)
 app.post("/api/reviews", verifyToken, async (req, res) => {
     try {
         await connectToDatabase();
-        const { name, quote, rating, link, avatar, published, order } = req.body;
+        const { name, quote, rating, link, avatar, published, order, pages } = req.body;
         if (!name || !quote) {
             return res.status(400).json({ success: false, message: "name and quote are required" });
         }
-        const review = new Review({ name, quote, rating, link, avatar, published, order });
+        const review = new Review({ name, quote, rating, link, avatar, published, order, pages: pages || [] });
         await review.save();
         res.json({ success: true, message: "Review created!", data: review });
     } catch (error) {
@@ -1057,7 +1115,7 @@ app.delete("/api/reviews/:id", verifyToken, async (req, res) => {
     }
 });
 
-// GET - Legacy Google Places proxy (kept for backwards compat; returns DB reviews or hardcoded fallback)
+// GET - Legacy Google Places proxy (kept for backwards compat)
 app.get("/api/reviews/google", async (req, res) => {
     try {
         await connectToDatabase();
@@ -1069,6 +1127,190 @@ app.get("/api/reviews/google", async (req, res) => {
         console.warn("DB unavailable for reviews, using static fallback");
     }
     res.json({ success: true, source: "fallback", data: fallbackReviews });
+});
+
+// ==========================================
+// VIDEO TESTIMONIALS API
+// ==========================================
+// IMPORTANT: specific routes (/admin/all, /upload, /serve/:id) must come
+// BEFORE the generic wildcard /:id routes.
+
+// GET - All published videos, optional ?page= filter (public)
+app.get("/api/videos", async (req, res) => {
+    try {
+        await connectToDatabase();
+        const { page } = req.query;
+        let query = { published: true };
+        if (page) {
+            query = { published: true, $or: [{ pages: page }, { pages: { $size: 0 } }] };
+        }
+        const videos = await VideoTestimonial.find(query).sort({ order: 1, createdAt: -1 });
+        // Resolve videoFileId to a stream URL
+        const data = videos.map(v => ({
+            ...v.toObject(),
+            resolvedUrl: v.videoFileId
+                ? `/api/videos/serve/${v.videoFileId}`
+                : v.videoUrl,
+        }));
+        res.json({ success: true, data });
+    } catch (error) {
+        console.error("Error fetching videos:", error);
+        res.status(500).json({ success: false, message: "Failed to fetch videos" });
+    }
+});
+
+// GET - All videos incl. unpublished (admin)
+app.get("/api/videos/admin/all", verifyToken, async (req, res) => {
+    try {
+        await connectToDatabase();
+        const videos = await VideoTestimonial.find({}).sort({ order: 1, createdAt: -1 });
+        const data = videos.map(v => ({
+            ...v.toObject(),
+            resolvedUrl: v.videoFileId ? `/api/videos/serve/${v.videoFileId}` : v.videoUrl,
+        }));
+        res.json({ success: true, data });
+    } catch (error) {
+        console.error("Error fetching all videos:", error);
+        res.status(500).json({ success: false, message: "Failed to fetch videos" });
+    }
+});
+
+// POST - Upload a video file to GridFS then create the VideoTestimonial document (admin)
+app.post("/api/videos/upload", verifyToken, (req, res, next) => {
+    videoUpload.single("video")(req, res, (err) => {
+        if (err) return next(err);
+        next();
+    });
+}, async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ success: false, message: "Video file is required" });
+        }
+        const name = req.body.name || "Unnamed";
+        const pages = req.body.pages ? JSON.parse(req.body.pages) : [];
+        const order = req.body.order ? Number(req.body.order) : 0;
+
+        const { gfsBucket } = await connectToDatabase();
+        const fileName = `video_${Date.now()}_${req.file.originalname}`;
+        const uploadStream = gfsBucket.openUploadStream(fileName, {
+            contentType: req.file.mimetype,
+        });
+        const fileId = uploadStream.id;
+
+        await new Promise((resolve, reject) => {
+            const { PassThrough } = require("stream");
+            const buf = new PassThrough();
+            buf.end(req.file.buffer);
+            buf.pipe(uploadStream).on("error", reject).on("finish", resolve);
+        });
+
+        const doc = new VideoTestimonial({ name, videoFileId: fileId, pages, order });
+        await doc.save();
+
+        res.json({
+            success: true,
+            message: "Video uploaded!",
+            data: { ...doc.toObject(), resolvedUrl: `/api/videos/serve/${fileId}` },
+        });
+    } catch (error) {
+        console.error("Error uploading video:", error);
+        res.status(500).json({ success: false, message: "Failed to upload video", error: error.message });
+    }
+});
+
+// GET - Stream a video from GridFS (public)
+app.get("/api/videos/serve/:id", async (req, res) => {
+    try {
+        const { gfsBucket } = await connectToDatabase();
+        const fileId = new mongoose.Types.ObjectId(req.params.id);
+        const files = await gfsBucket.find({ _id: fileId }).toArray();
+        if (!files || files.length === 0) {
+            return res.status(404).json({ success: false, message: "Video not found" });
+        }
+        const file = files[0];
+
+        // Support range requests for native video seeking in browser
+        const range = req.headers.range;
+        if (range) {
+            const parts = range.replace(/bytes=/, "").split("-");
+            const start = parseInt(parts[0], 10);
+            const end = parts[1] ? parseInt(parts[1], 10) : file.length - 1;
+            const chunkSize = end - start + 1;
+            res.writeHead(206, {
+                "Content-Range": `bytes ${start}-${end}/${file.length}`,
+                "Accept-Ranges": "bytes",
+                "Content-Length": chunkSize,
+                "Content-Type": file.contentType || "video/mp4",
+            });
+            gfsBucket.openDownloadStream(fileId, { start, end: end + 1 }).pipe(res);
+        } else {
+            res.set({
+                "Content-Type": file.contentType || "video/mp4",
+                "Content-Length": file.length,
+                "Accept-Ranges": "bytes",
+            });
+            gfsBucket.openDownloadStream(fileId).pipe(res);
+        }
+    } catch (err) {
+        console.error("Error serving video:", err);
+        res.status(400).json({ success: false, message: "Invalid video ID" });
+    }
+});
+
+// POST - Create video entry with external URL (no file upload) (admin)
+app.post("/api/videos", verifyToken, async (req, res) => {
+    try {
+        await connectToDatabase();
+        const { name, videoUrl, pages, order, published } = req.body;
+        if (!name) return res.status(400).json({ success: false, message: "name is required" });
+        if (!videoUrl) return res.status(400).json({ success: false, message: "videoUrl is required for URL-only entries" });
+        const doc = new VideoTestimonial({ name, videoUrl, pages: pages || [], order: order || 0, published: published ?? true });
+        await doc.save();
+        res.json({ success: true, message: "Video entry created!", data: { ...doc.toObject(), resolvedUrl: videoUrl } });
+    } catch (error) {
+        console.error("Error creating video:", error);
+        res.status(500).json({ success: false, message: "Failed to create video entry", error: error.message });
+    }
+});
+
+// PUT - Update video entry by _id (admin)
+app.put("/api/videos/:id", verifyToken, async (req, res) => {
+    try {
+        await connectToDatabase();
+        const updated = await VideoTestimonial.findByIdAndUpdate(
+            req.params.id, { ...req.body }, { new: true, runValidators: true }
+        );
+        if (!updated) return res.status(404).json({ success: false, message: "Video not found" });
+        res.json({ success: true, message: "Video updated!", data: {
+            ...updated.toObject(),
+            resolvedUrl: updated.videoFileId ? `/api/videos/serve/${updated.videoFileId}` : updated.videoUrl,
+        }});
+    } catch (error) {
+        console.error("Error updating video:", error);
+        res.status(500).json({ success: false, message: "Failed to update video", error: error.message });
+    }
+});
+
+// DELETE - Delete video entry + GridFS file if applicable (admin)
+app.delete("/api/videos/:id", verifyToken, async (req, res) => {
+    try {
+        await connectToDatabase();
+        const doc = await VideoTestimonial.findByIdAndDelete(req.params.id);
+        if (!doc) return res.status(404).json({ success: false, message: "Video not found" });
+        // Clean up GridFS file if it was an upload
+        if (doc.videoFileId) {
+            try {
+                const { gfsBucket } = await connectToDatabase();
+                await gfsBucket.delete(new mongoose.Types.ObjectId(doc.videoFileId));
+            } catch (e) {
+                console.warn("Could not delete GridFS video file:", e.message);
+            }
+        }
+        res.json({ success: true, message: "Video deleted!" });
+    } catch (error) {
+        console.error("Error deleting video:", error);
+        res.status(500).json({ success: false, message: "Failed to delete video" });
+    }
 });
 
 // Global error handling middleware
