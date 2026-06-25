@@ -102,7 +102,7 @@ const upload = multer({
 
 const imageUpload = multer({
     storage,
-    limits: {fileSize: 2 * 1024 * 1024}, // 2MB limit
+    limits: {fileSize: 10 * 1024 * 1024}, // 10MB limit
     fileFilter: (req, file, cb) => {
         const allowedTypes = ["image/png", "image/jpeg", "image/jpg", "image/svg+xml", "image/webp", "image/gif"];
         if (allowedTypes.includes(file.mimetype)) {
@@ -572,29 +572,8 @@ app.get("/api/blogs", async (req, res) => {
     }
 });
 
-// GET - Fetch single blog by ID or slug
-app.get("/api/blogs/:id", async (req, res) => {
-    try {
-        await connectToDatabase();
-        let blog;
-        if (mongoose.Types.ObjectId.isValid(req.params.id)) {
-            blog = await Blog.findById(req.params.id);
-        }
-        if (!blog) {
-            blog = await Blog.findOne({ slug: req.params.id });
-        }
-        if (!blog) {
-            return res.status(404).json({ success: false, message: "Blog not found" });
-        }
-        res.json({ success: true, data: blog });
-    } catch (error) {
-        console.error("Error fetching blog details:", error);
-        res.status(400).json({ success: false, message: "Invalid blog ID or slug, or error retrieving blog" });
-    }
-});
-
 // POST - Upload blog image to GridFS (admin only)
-// Declared before POST /api/blogs to avoid matching /api/blogs/:id or similar patterns
+// Declared before GET /api/blogs/:id to avoid matching patterns
 app.post("/api/blogs/upload-image", verifyToken, (req, res, next) => {
     imageUpload.single("image")(req, res, (err) => {
         if (err) {
@@ -670,6 +649,27 @@ app.get("/api/blogs/image/:id", async (req, res) => {
     } catch (error) {
         console.error("Error serving blog image:", error);
         res.status(500).json({ success: false, message: "Failed to serve image", error: error.message });
+    }
+});
+
+// GET - Fetch single blog by ID or slug
+app.get("/api/blogs/:id", async (req, res) => {
+    try {
+        await connectToDatabase();
+        let blog;
+        if (mongoose.Types.ObjectId.isValid(req.params.id)) {
+            blog = await Blog.findById(req.params.id);
+        }
+        if (!blog) {
+            blog = await Blog.findOne({ slug: req.params.id });
+        }
+        if (!blog) {
+            return res.status(404).json({ success: false, message: "Blog not found" });
+        }
+        res.json({ success: true, data: blog });
+    } catch (error) {
+        console.error("Error fetching blog details:", error);
+        res.status(400).json({ success: false, message: "Invalid blog ID or slug, or error retrieving blog" });
     }
 });
 
