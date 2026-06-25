@@ -572,18 +572,104 @@ app.get("/api/blogs", async (req, res) => {
     }
 });
 
-// GET - Fetch single blog by ID
+// GET - Fetch single blog by ID or slug
 app.get("/api/blogs/:id", async (req, res) => {
     try {
         await connectToDatabase();
-        const blog = await Blog.findById(req.params.id);
+        let blog;
+        if (mongoose.Types.ObjectId.isValid(req.params.id)) {
+            blog = await Blog.findById(req.params.id);
+        }
+        if (!blog) {
+            blog = await Blog.findOne({ slug: req.params.id });
+        }
         if (!blog) {
             return res.status(404).json({ success: false, message: "Blog not found" });
         }
         res.json({ success: true, data: blog });
     } catch (error) {
         console.error("Error fetching blog details:", error);
-        res.status(400).json({ success: false, message: "Invalid blog ID or error retrieving blog" });
+        res.status(400).json({ success: false, message: "Invalid blog ID or slug, or error retrieving blog" });
+    }
+});
+
+// POST - Upload blog image to GridFS (admin only)
+// Declared before POST /api/blogs to avoid matching /api/blogs/:id or similar patterns
+app.post("/api/blogs/upload-image", verifyToken, (req, res, next) => {
+    imageUpload.single("image")(req, res, (err) => {
+        if (err) {
+            return next(err);
+        }
+        next();
+    });
+}, async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ success: false, message: "Image file is required" });
+        }
+
+        const { gfsBucket } = await connectToDatabase();
+        const fileName = `blog_image_${Date.now()}_${req.file.originalname}`;
+        const uploadStream = gfsBucket.openUploadStream(fileName, {
+            contentType: req.file.mimetype,
+        });
+
+        const fileId = uploadStream.id;
+
+        await new Promise((resolve, reject) => {
+            const stream = require("stream");
+            const bufferStream = new stream.PassThrough();
+            bufferStream.end(req.file.buffer);
+            bufferStream
+                .pipe(uploadStream)
+                .on("error", reject)
+                .on("finish", resolve);
+        });
+
+        console.log(`Successfully uploaded blog image to GridFS with ID: ${fileId}`);
+
+        res.json({
+            success: true,
+            message: "Blog image uploaded successfully!",
+            url: `/api/blogs/image/${fileId}`,
+        });
+    } catch (error) {
+        console.error("Error uploading blog image:", error);
+        res.status(500).json({ success: false, message: "Failed to upload image", error: error.message });
+    }
+});
+
+// GET - Serve blog image from GridFS (public)
+app.get("/api/blogs/image/:id", async (req, res) => {
+    try {
+        const { gfsBucket } = await connectToDatabase();
+        const fileId = new mongoose.Types.ObjectId(req.params.id);
+        const files = await gfsBucket.find({ _id: fileId }).toArray();
+
+        if (!files || files.length === 0) {
+            return res.status(404).json({ success: false, message: "Image not found" });
+        }
+
+        const file = files[0];
+
+        res.set({
+            "Content-Type": file.contentType || "image/png",
+            "Cache-Control": "public, max-age=31536000",
+        });
+
+        const downloadStream = gfsBucket.openDownloadStream(fileId);
+
+        downloadStream.on("error", (error) => {
+            console.error("Blog image serving error:", error);
+            if (!res.headersSent) {
+                res.status(500).send("Error streaming image");
+            }
+        });
+
+        downloadStream.pipe(res);
+    } catch (error) {
+        console.error("Error serving blog image:", error);
+        res.status(500).json({ success: false, message: "Failed to serve image", error: error.message });
     }
 });
 
@@ -591,14 +677,26 @@ app.get("/api/blogs/:id", async (req, res) => {
 app.post("/api/blogs", verifyToken, async (req, res) => {
     try {
         await connectToDatabase();
-        const { title, subtitle, content, category, tags, imageUrl, readTime, authorName, published } = req.body;
+        const { title, slug, subtitle, content, category, tags, imageUrl, readTime, authorName, published } = req.body;
         
         if (!title || !content || !category) {
             return res.status(400).json({ success: false, message: "Title, content, and category are required fields." });
         }
+
+        let finalSlug = slug ? slug.trim().toLowerCase().replace(/[^a-z0-9-_]/g, "-") : title.toLowerCase().replace(/[^a-z0-9]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+        if (!finalSlug) {
+            finalSlug = `blog-${Date.now()}`;
+        }
+
+        // Check if slug already exists
+        const existingBlog = await Blog.findOne({ slug: finalSlug });
+        if (existingBlog) {
+            return res.status(400).json({ success: false, message: `Slug '${finalSlug}' is already in use. Please choose a different slug.` });
+        }
         
         const newBlog = new Blog({
             title,
+            slug: finalSlug,
             subtitle,
             content,
             category,
@@ -621,10 +719,21 @@ app.post("/api/blogs", verifyToken, async (req, res) => {
 app.put("/api/blogs/:id", verifyToken, async (req, res) => {
     try {
         await connectToDatabase();
-        const { title, subtitle, content, category, tags, imageUrl, readTime, authorName, published } = req.body;
+        const { title, slug, subtitle, content, category, tags, imageUrl, readTime, authorName, published } = req.body;
         
         if (!title || !content || !category) {
             return res.status(400).json({ success: false, message: "Title, content, and category are required fields." });
+        }
+
+        let finalSlug = slug ? slug.trim().toLowerCase().replace(/[^a-z0-9-_]/g, "-") : title.toLowerCase().replace(/[^a-z0-9]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+        if (!finalSlug) {
+            finalSlug = `blog-${Date.now()}`;
+        }
+
+        // Check if slug already exists in another blog
+        const existingBlog = await Blog.findOne({ slug: finalSlug, _id: { $ne: req.params.id } });
+        if (existingBlog) {
+            return res.status(400).json({ success: false, message: `Slug '${finalSlug}' is already in use. Please choose a different slug.` });
         }
         
         const parsedTags = Array.isArray(tags) ? tags : (tags ? tags.split(",").map(t => t.trim()) : []);
@@ -633,6 +742,7 @@ app.put("/api/blogs/:id", verifyToken, async (req, res) => {
             req.params.id,
             {
                 title,
+                slug: finalSlug,
                 subtitle,
                 content,
                 category,
